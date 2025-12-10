@@ -1,0 +1,37 @@
+# ESPHome
+secrets.yaml
+.esphome/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*.old
+
+# Personal notes
+NOTES.md
+TODO.md
+
+# Photos with sensitive info
+docs/photos/serial-numbers/
+docs/photos/personal/

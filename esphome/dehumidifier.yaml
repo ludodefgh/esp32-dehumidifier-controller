@@ -1,0 +1,364 @@
+# ESP32-C3 Dehumidifier Controller Configuration
+# ESPHome YAML Configuration File
+
+substitutions:
+  device_name: dehumidifier-controller
+  friendly_name: "Dehumidifier"
+  
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  platformio_options:
+    board_build.flash_mode: dio
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: arduino  # Use arduino framework for better ESPHome compatibility
+
+# Enable logging
+logger:
+  level: INFO  # Change to DEBUG for troubleshooting
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+# Enable OTA updates
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# WiFi Configuration
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  
+  # Optimize WiFi settings for reliability
+  power_save_mode: none
+  fast_connect: true
+  output_power: 20dB
+  reboot_timeout: 15min
+  enable_on_boot: true
+  
+  # Fallback hotspot
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret fallback_password
+
+# Captive portal for initial setup
+captive_portal:
+
+# Web server (optional - disable to save memory)
+# web_server:
+#   port: 80
+
+# Status LED (optional)
+# status_led:
+#   pin: GPIO8
+
+# ============================================
+# SENSORS
+# ============================================
+
+sensor:
+  # LED State Detection via Voltage Divider
+  - platform: adc
+    pin: GPIO3
+    name: "${friendly_name} LED Voltage"
+    id: dehum_voltage
+    update_interval: 1s
+    attenuation: 11db
+    accuracy_decimals: 2
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    filters:
+      # Multiply by 2 because of 50/50 voltage divider (2x 10kΩ)
+      - multiply: 2.0
+      # Smooth readings with moving average
+      - sliding_window_moving_average:
+          window_size: 5
+          send_every: 1
+    # Optional: Alert if voltage is unexpected
+    # on_value_range:
+    #   - above: 2.0
+    #     below: 3.0
+    #     then:
+    #       - logger.log: "LED voltage in normal range"
+  
+  # WiFi Signal Strength
+  - platform: wifi_signal
+    name: "${friendly_name} WiFi Signal"
+    id: wifi_rssi
+    update_interval: 60s
+    unit_of_measurement: "dBm"
+    accuracy_decimals: 0
+    device_class: signal_strength
+    state_class: measurement
+    filters:
+      - sliding_window_moving_average:
+          window_size: 3
+          send_every: 1
+  
+  # WiFi Signal as Percentage (easier to read)
+  - platform: copy
+    source_id: wifi_rssi
+    name: "${friendly_name} WiFi Signal Percent"
+    unit_of_measurement: "%"
+    filters:
+      - lambda: |-
+          if (x <= -100) return 0;
+          if (x >= -50) return 100;
+          return 2 * (x + 100);
+    accuracy_decimals: 0
+    icon: mdi:wifi
+
+  # Uptime sensor
+  - platform: uptime
+    name: "${friendly_name} Uptime"
+    id: uptime_sensor
+    update_interval: 60s
+
+# ============================================
+# BINARY SENSORS
+# ============================================
+
+binary_sensor:
+  # Dehumidifier Running State (derived from LED voltage)
+  - platform: template
+    name: "${friendly_name} Running"
+    id: dehum_running
+    device_class: running
+    lambda: |-
+      // LED ON when voltage > 1.0V (adjustable threshold)
+      if (id(dehum_voltage).state > 1.0) {
+        return true;  // Dehumidifier is ON
+      } else {
+        return false; // Dehumidifier is OFF
+      }
+    # Optional: Trigger automations on state change
+    on_press:
+      then:
+        - logger.log: "Dehumidifier turned ON"
+    on_release:
+      then:
+        - logger.log: "Dehumidifier turned OFF"
+  
+  # WiFi Connection Status
+  - platform: status
+    name: "${friendly_name} Status"
+
+# ============================================
+# SWITCHES
+# ============================================
+
+switch:
+  # Internal GPIO switch for touch button control
+  - platform: gpio
+    pin: GPIO5
+    id: touch_pin
+    internal: true  # Hidden from Home Assistant UI
+    inverted: false
+    restore_mode: ALWAYS_OFF  # Ensure OFF on boot
+  
+  # User-facing switch for dehumidifier power control
+  - platform: template
+    name: "${friendly_name} Power"
+    id: dehum_power
+    icon: mdi:air-humidifier
+    optimistic: false  # Derive state from LED sensor
+    lambda: |-
+      // Switch state follows actual running state
+      return id(dehum_running).state;
+    
+    # Turn ON action
+    turn_on_action:
+      - if:
+          condition:
+            # Only toggle if currently OFF
+            binary_sensor.is_off: dehum_running
+          then:
+            - logger.log: "Turning ON dehumidifier"
+            - switch.turn_on: touch_pin
+            - delay: 500ms  # Touch pulse duration
+            - switch.turn_off: touch_pin
+            - logger.log: "Touch pulse complete"
+          else:
+            - logger.log: "Dehumidifier already ON, ignoring"
+    
+    # Turn OFF action
+    turn_off_action:
+      - if:
+          condition:
+            # Only toggle if currently ON
+            binary_sensor.is_on: dehum_running
+          then:
+            - logger.log: "Turning OFF dehumidifier"
+            - switch.turn_on: touch_pin
+            - delay: 500ms  # Touch pulse duration
+            - switch.turn_off: touch_pin
+            - logger.log: "Touch pulse complete"
+          else:
+            - logger.log: "Dehumidifier already OFF, ignoring"
+  
+  # Restart ESP32 switch (useful for remote troubleshooting)
+  - platform: restart
+    name: "${friendly_name} Restart"
+    icon: mdi:restart
+
+# ============================================
+# TEXT SENSORS
+# ============================================
+
+text_sensor:
+  # ESPHome version
+  - platform: version
+    name: "${friendly_name} ESPHome Version"
+    hide_timestamp: true
+  
+  # WiFi info
+  - platform: wifi_info
+    ip_address:
+      name: "${friendly_name} IP Address"
+    ssid:
+      name: "${friendly_name} WiFi SSID"
+    bssid:
+      name: "${friendly_name} WiFi BSSID"
+    mac_address:
+      name: "${friendly_name} MAC Address"
+
+# ============================================
+# BUTTONS
+# ============================================
+
+button:
+  # Manual toggle button (for testing)
+  - platform: template
+    name: "${friendly_name} Toggle"
+    icon: mdi:power
+    on_press:
+      then:
+        - logger.log: "Manual toggle requested"
+        - switch.turn_on: touch_pin
+        - delay: 500ms
+        - switch.turn_off: touch_pin
+
+# ============================================
+# INTERVALS & AUTOMATIONS
+# ============================================
+
+# Optional: Periodic state check and correction
+# interval:
+#   - interval: 5min
+#     then:
+#       - logger.log:
+#           format: "Status check - Running: %d, Voltage: %.2fV"
+#           args: [ 'id(dehum_running).state', 'id(dehum_voltage).state' ]
+
+# ============================================
+# NOTES & CONFIGURATION TIPS
+# ============================================
+
+# CALIBRATION:
+# 
+# 1. LED Detection Threshold (line ~95):
+#    - Default: 1.0V triggers "ON" state
+#    - Adjust based on your LED voltage readings
+#    - Measure actual voltage when LED is ON/OFF
+#    - Set threshold to midpoint for reliability
+#
+# 2. Touch Pulse Duration (lines ~159, 176):
+#    - Default: 500ms
+#    - Increase if touch doesn't register (try 750ms or 1000ms)
+#    - Decrease if false triggers occur (try 300ms)
+#    - Test with manual button to find optimal value
+#
+# 3. Voltage Divider Multiplier (line ~69):
+#    - Default: 2.0 (for equal 10kΩ resistors)
+#    - If using different resistor values:
+#      multiplier = (R1 + R2) / R2
+#    - Example: R1=22kΩ, R2=10kΩ → multiply: 3.2
+#
+# 4. GPIO Pins:
+#    - GPIO3: ADC input for LED voltage sensing
+#    - GPIO5: Digital output for touch control
+#    - Verify your ESP32-C3 pin layout matches
+#
+# TROUBLESHOOTING:
+#
+# - Enable DEBUG logging (line 17) for detailed output
+# - Check "Dehumidifier LED Voltage" sensor in HA
+# - Manually trigger "Toggle" button to test touch
+# - Monitor ESPHome logs during operation
+# - Verify WiFi signal strength is adequate (>-70 dBm)
+#
+# SAFETY:
+#
+# - Never exceed 3.3V on ESP32 GPIO pins
+# - Verify voltage divider before connecting to GPIO3
+# - Test with multimeter before powering on
+# - Ensure proper GND connections throughout
+#
+# PERFORMANCE:
+#
+# - Update intervals balanced for responsiveness vs. load
+# - WiFi power save disabled for reliability
+# - Sensor averaging reduces noise
+# - State-based logic prevents unnecessary toggles
+
+# ============================================
+# ADVANCED FEATURES (OPTIONAL)
+# ============================================
+
+# Uncomment sections below to enable additional features:
+
+# MQTT Support (if not using Home Assistant API)
+# mqtt:
+#   broker: !secret mqtt_broker
+#   username: !secret mqtt_username
+#   password: !secret mqtt_password
+#   discovery: true
+
+# External Temperature/Humidity Sensor (if added)
+# sensor:
+#   - platform: dht
+#     pin: GPIO4
+#     model: DHT22
+#     temperature:
+#       name: "${friendly_name} Temperature"
+#     humidity:
+#       name: "${friendly_name} Humidity"
+#     update_interval: 30s
+
+# Water Tank Full Detection (if hardware added)
+# binary_sensor:
+#   - platform: gpio
+#     pin:
+#       number: GPIO6
+#       mode: INPUT_PULLUP
+#     name: "${friendly_name} Tank Full"
+#     device_class: problem
+#     filters:
+#       - delayed_on: 100ms
+#       - delayed_off: 5s
+
+# Run Time Counter
+# sensor:
+#   - platform: integration
+#     name: "${friendly_name} Run Time"
+#     sensor: dehum_running
+#     time_unit: h
+#     unit_of_measurement: "h"
+
+# Energy Monitoring (if current sensor added)
+# sensor:
+#   - platform: ina219
+#     address: 0x40
+#     shunt_resistance: 0.1 ohm
+#     current:
+#       name: "${friendly_name} Current"
+#     power:
+#       name: "${friendly_name} Power"
+#     update_interval: 5s
